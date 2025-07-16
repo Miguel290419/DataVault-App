@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "request": "launch",
+      "name": "Debug Android - DataVault",
+      "type": "reactnative",
+      "cwd": "${workspaceFolder}",
+      "platform": "android",
+      "sourceMaps": true,
+      "env": {
+        "REACT_DEBUG": "true",
+        "ENCRYPTION_KEY_DEV": "clave_temporal"
+      },
+      "target": "emulator"
+    }
+  ]
+}
