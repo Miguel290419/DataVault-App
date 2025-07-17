@@ -1,7 +1,8 @@
 {
   "extends": "@react-native/typescript-config",
   "compilerOptions": {
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"] // <--- ¡Añade esta línea!
   },
   "include": ["**/*.ts", "**/*.d.ts"]
 }
