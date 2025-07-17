@@ -5,20 +5,81 @@ import {
 } from 'react-native-sqlite-storage';
 import 'react-native-get-random-values';
 import CryptoJS from 'crypto-js';
+import * as Keychain from 'react-native-keychain';
 
 enablePromise(true);
 
 const databaseName = 'datavault.db';
 const databaseLocation = 'default';
 
-const ENCRYPTION_PASSPHRASE = 'MiFraseSecretaMuySeguraParaAES256!'; // passphrase
-const PBKDF2_SALT = 'algun_salt_unico_para_derivacion'; // salt for key derivation
+const PASSPHRASE_KEY = 'datavault_encryption_passphrase';
+const SALT_KEY = 'datavault_pbkdf2_salt';
 
-const ENCRYPTION_KEY = CryptoJS.PBKDF2(
-  ENCRYPTION_PASSPHRASE,
-  PBKDF2_SALT,
-  { keySize: 256 / 32, iterations: 1000 }, // keySize in WordArray words (1 word = 4 bytes)
-);
+const generateRandomString = (length: number): string => {
+  const chars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz123456789!@#$%^&*()_+-=[]{}<>?';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+};
+
+const getOrGeneratePassphrase = async (): Promise<string> => {
+  try {
+    const credentials = await Keychain.getInternetCredentials(PASSPHRASE_KEY);
+    if (credentials && credentials.password) {
+      return credentials.password;
+    }
+  } catch (error) {
+    console.log('No existing passphrase found, generating new one...');
+  }
+
+  const newPassphrase = generateRandomString(64);
+  try {
+    await Keychain.setInternetCredentials(
+      PASSPHRASE_KEY,
+      'datavault',
+      newPassphrase,
+    );
+    console.log('New encryption passphrase generated and stored securely');
+    return newPassphrase;
+  } catch (error) {
+    console.error('Failed to store passphrase securely:', error);
+    throw new Error('Could not secure encryption passphrase');
+  }
+};
+
+const getOrGenerateSalt = async (): Promise<string> => {
+  try {
+    const credentials = await Keychain.getInternetCredentials(SALT_KEY);
+    if (credentials && credentials.password) {
+      return credentials.password;
+    }
+  } catch (error) {
+    console.log('No existing salt found, generating new one...');
+  }
+
+  const newSalt = generateRandomString(32);
+  try {
+    await Keychain.setInternetCredentials(SALT_KEY, 'datavault', newSalt);
+    console.log('New PBKDF2 salt generated and stored securely');
+    return newSalt;
+  } catch (error) {
+    console.error('Failed to store salt securely:', error);
+    throw new Error('Could not secure PBKDF2salt');
+  }
+};
+
+const getEncryptionKey = async (): Promise<CryptoJS.lib.WordArray> => {
+  const passphrase = await getOrGeneratePassphrase();
+  const salt = await getOrGenerateSalt();
+
+  return CryptoJS.PBKDF2(passphrase, salt, {
+    keySize: 256 / 32,
+    iterations: 1000,
+  });
+};
 
 export const getDBConnection = async (): Promise<SQLiteDatabase> => {
   return openDatabase({
@@ -50,9 +111,10 @@ export const saveNote = async (
   console.log('[saveNote] Parámetros recibidos:', { title, content, now });
 
   try {
-    // Encrypt title
+    const encryptionKey = await getEncryptionKey();
+
     const titleIv = CryptoJS.lib.WordArray.random(16 / 4); // 16 bytes = 4 words
-    const encryptedTitle = CryptoJS.AES.encrypt(title, ENCRYPTION_KEY, {
+    const encryptedTitle = CryptoJS.AES.encrypt(title, encryptionKey, {
       iv: titleIv,
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
@@ -61,9 +123,8 @@ export const saveNote = async (
     const titleIvBase64 = titleIv.toString(CryptoJS.enc.Base64);
     const titleToSave = `${titleIvBase64}:${encryptedTitleBase64}`;
 
-    // Encrypt content
     const contentIv = CryptoJS.lib.WordArray.random(16 / 4); // 16 bytes = 4 words
-    const encryptedContent = CryptoJS.AES.encrypt(content, ENCRYPTION_KEY, {
+    const encryptedContent = CryptoJS.AES.encrypt(content, encryptionKey, {
       iv: contentIv,
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
@@ -98,7 +159,6 @@ export const getNotes = async (db: SQLiteDatabase): Promise<any[]> => {
   for (let i = 0; i < result.rows.length; i++) {
     const row = result.rows.item(i);
 
-    // Check if title and content are in the expected encrypted format
     if (
       !row.title ||
       !row.content ||
@@ -116,12 +176,12 @@ export const getNotes = async (db: SQLiteDatabase): Promise<any[]> => {
     }
 
     try {
-      // Decrypt title
+      const encryptionKey = await getEncryptionKey();
       const [titleIvBase64, encryptedTitleBase64] = row.title.split(':');
       const titleIv = CryptoJS.enc.Base64.parse(titleIvBase64);
       const decryptedTitle = CryptoJS.AES.decrypt(
         encryptedTitleBase64,
-        ENCRYPTION_KEY,
+        encryptionKey,
         {
           iv: titleIv,
           mode: CryptoJS.mode.CBC,
@@ -130,12 +190,11 @@ export const getNotes = async (db: SQLiteDatabase): Promise<any[]> => {
       );
       const decryptedTitleContent = decryptedTitle.toString(CryptoJS.enc.Utf8);
 
-      // Decrypt content
       const [contentIvBase64, encryptedContentBase64] = row.content.split(':');
       const contentIv = CryptoJS.enc.Base64.parse(contentIvBase64);
       const decryptedContent = CryptoJS.AES.decrypt(
         encryptedContentBase64,
-        ENCRYPTION_KEY,
+        encryptionKey,
         {
           iv: contentIv,
           mode: CryptoJS.mode.CBC,
@@ -155,7 +214,7 @@ export const getNotes = async (db: SQLiteDatabase): Promise<any[]> => {
         row.id,
         decryptionError,
       );
-      notes.push(row); // Push original if decryption fails
+      notes.push(row);
     }
   }
   console.log('[getNotes] Notas cargadas y descifradas.');
@@ -171,9 +230,10 @@ export const updateNote = async (
   const now = Date.now();
 
   try {
-    // Encrypt title
+    const encryptionKey = await getEncryptionKey();
+
     const titleIv = CryptoJS.lib.WordArray.random(16 / 4); // 16 bytes = 4 words
-    const encryptedTitle = CryptoJS.AES.encrypt(title, ENCRYPTION_KEY, {
+    const encryptedTitle = CryptoJS.AES.encrypt(title, encryptionKey, {
       iv: titleIv,
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
@@ -182,9 +242,8 @@ export const updateNote = async (
     const titleIvBase64 = titleIv.toString(CryptoJS.enc.Base64);
     const titleToSave = `${titleIvBase64}:${encryptedTitleBase64}`;
 
-    // Encrypt content
     const contentIv = CryptoJS.lib.WordArray.random(16 / 4); // 16 bytes = 4 words
-    const encryptedContent = CryptoJS.AES.encrypt(content, ENCRYPTION_KEY, {
+    const encryptedContent = CryptoJS.AES.encrypt(content, encryptionKey, {
       iv: contentIv,
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
@@ -221,7 +280,6 @@ export const getNoteById = async (
   if (result.rows.length > 0) {
     const row = result.rows.item(0);
 
-    // Check if title and content are in the expected encrypted format
     if (
       !row.title ||
       !row.content ||
@@ -238,12 +296,12 @@ export const getNoteById = async (
     }
 
     try {
-      // Decrypt title
+      const encryptionKey = await getEncryptionKey();
       const [titleIvBase64, encryptedTitleBase64] = row.title.split(':');
       const titleIv = CryptoJS.enc.Base64.parse(titleIvBase64);
       const decryptedTitle = CryptoJS.AES.decrypt(
         encryptedTitleBase64,
-        ENCRYPTION_KEY,
+        encryptionKey,
         {
           iv: titleIv,
           mode: CryptoJS.mode.CBC,
@@ -252,12 +310,11 @@ export const getNoteById = async (
       );
       const decryptedTitleContent = decryptedTitle.toString(CryptoJS.enc.Utf8);
 
-      // Decrypt content
       const [contentIvBase64, encryptedContentBase64] = row.content.split(':');
       const contentIv = CryptoJS.enc.Base64.parse(contentIvBase64);
       const decryptedContent = CryptoJS.AES.decrypt(
         encryptedContentBase64,
-        ENCRYPTION_KEY,
+        encryptionKey,
         {
           iv: contentIv,
           mode: CryptoJS.mode.CBC,
